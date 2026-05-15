@@ -12,6 +12,45 @@ import io
 # 1. CONFIGURAȚIA PAGINII
 # ==========================================
 st.set_page_config(page_title="Portfolio Terminal", page_icon="📈", layout="wide")
+# ==========================================
+# 2. PROTOCOL DE SECURITATE
+# ==========================================
+def check_password():
+    try:
+        PAROLA_SECRETA = st.secrets["APP_PASSWORD"]
+    except (KeyError, FileNotFoundError):
+        st.error("⚠️ Secretul APP_PASSWORD nu este configurat. Adaugă-l în Settings → Secrets pe Streamlit Cloud.")
+        st.stop()
+
+    def password_entered():
+        if st.session_state.get("password_input") == PAROLA_SECRETA:
+            st.session_state["authenticated"] = True
+        else:
+            st.session_state["authenticated"] = False
+
+    if st.session_state.get("authenticated"):
+        return True
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    st.markdown(
+        "<h1 style='text-align: center; font-family: Georgia, serif; color: #E8C468; letter-spacing: 2px;'>"
+        "AUTENTIFICARE NECESARĂ</h1>",
+        unsafe_allow_html=True
+    )
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.text_input(
+            "Cheie de acces:",
+            type="password",
+            on_change=password_entered,
+            key="password_input"
+        )
+        if "authenticated" in st.session_state and not st.session_state["authenticated"]:
+            st.error("Cod incorect. Acces refuzat.")
+    return False
+
+if not check_password():
+    st.stop()
 
 
 
