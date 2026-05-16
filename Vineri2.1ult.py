@@ -7,23 +7,27 @@ import yfinance as yf
 import numpy as np
 from datetime import datetime
 import io
+import requests
+import html as html_lib
+from html.parser import HTMLParser
 
 # ==========================================
 # 1. CONFIGURAȚIA PAGINII
 # ==========================================
 st.set_page_config(page_title="Portfolio Terminal", page_icon="📈", layout="wide")
+
 # ==========================================
-# 2. PROTOCOL DE SECURITATE
+# 2. PROTOCOL DE SECURITATE (STREAMLIT SECRETS)
 # ==========================================
 def check_password():
     try:
-        PAROLA_SECRETA = st.secrets["APP_PASSWORD"]
+        Capitan123 = st.secrets["APP_PASSWORD"]
     except (KeyError, FileNotFoundError):
         st.error("⚠️ Secretul APP_PASSWORD nu este configurat. Adaugă-l în Settings → Secrets pe Streamlit Cloud.")
         st.stop()
 
     def password_entered():
-        if st.session_state.get("password_input") == PAROLA_SECRETA:
+        if st.session_state.get("password_input") == Capitan123:
             st.session_state["authenticated"] = True
         else:
             st.session_state["authenticated"] = False
@@ -33,24 +37,25 @@ def check_password():
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     st.markdown(
-        "<h1 style='text-align: center; font-family: Georgia, serif; color: #E8C468; letter-spacing: 2px;'>"
-        "AUTENTIFICARE NECESARĂ</h1>",
+        "<h1 style='text-align: center; color: #FF00FF; text-shadow: 0 0 10px #FF00FF; font-family: Courier New;'>"
+        "🔒 PROTOCOL DE SECURITATE ACTIVAT</h1>",
         unsafe_allow_html=True
     )
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.text_input(
-            "Cheie de acces:",
+            "📡 Introdu Cheia de Autorizare IBKR:",
             type="password",
             on_change=password_entered,
             key="password_input"
         )
         if "authenticated" in st.session_state and not st.session_state["authenticated"]:
-            st.error("Cod incorect. Acces refuzat.")
+            st.error("❌ Cod incorect. Acces respins.")
     return False
 
 if not check_password():
     st.stop()
+
 
 
 
@@ -103,10 +108,14 @@ st.markdown("""
     /* ── Metric Cards ─────────────────────────── */
     [data-testid="stMetric"] {
         background-color: #161B22;
-        padding: 20px 24px;
+        padding: 18px 20px;
+        min-height: 132px;
         border-radius: 8px;
         border: 1px solid #21262D;
         border-top: 2px solid #E8C468;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
         transition: border-color 0.2s ease;
     }
     [data-testid="stMetric"]:hover {
@@ -117,18 +126,24 @@ st.markdown("""
         color: #E0E6F0 !important;
         font-family: 'DM Mono', monospace !important;
         font-weight: 500 !important;
-        font-size: 1.4rem !important;
+        font-size: clamp(1.05rem, 1.1vw, 1.35rem) !important;
+        line-height: 1.2 !important;
         text-shadow: none !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
     }
     [data-testid="stMetricLabel"] p {
         color: #8B949E !important;
-        font-size: 0.72rem !important;
+        font-size: 0.68rem !important;
         text-transform: uppercase;
         letter-spacing: 1.2px;
+        min-height: 2.1em;
+        line-height: 1.15 !important;
     }
     [data-testid="stMetricDelta"] {
         font-family: 'DM Mono', monospace !important;
-        font-size: 0.85rem !important;
+        font-size: 0.78rem !important;
+        min-height: 1.2rem;
     }
 
     /* ── Tabs ─────────────────────────────────── */
@@ -352,6 +367,49 @@ PLOTLY_BASE = dict(
 # Ax defaults reutilizabile — folosite explicit per grafic
 AX = dict(gridcolor=C['grid'], linecolor=C['border'], tickfont=dict(color=C['text_dim'], size=11))
 
+PRO_CHART_MARGIN = dict(t=34, b=28, l=12, r=16)
+PRO_LEGEND = dict(
+    orientation="h",
+    yanchor="bottom",
+    y=1.02,
+    xanchor="right",
+    x=1,
+    font=dict(color=C['text_dim'], size=11)
+)
+
+def apply_pro_chart_layout(fig, height=320, y_title=None, x_title=""):
+    fig.update_layout(
+        **PLOTLY_BASE,
+        height=height,
+        margin=PRO_CHART_MARGIN,
+        hovermode="x unified",
+        legend=PRO_LEGEND,
+        hoverlabel=dict(
+            bgcolor=C['surface'],
+            bordercolor=C['border'],
+            font=dict(color=C['text'], family="DM Sans, sans-serif", size=12)
+        )
+    )
+    fig.update_xaxes(
+        title=x_title,
+        showgrid=False,
+        showline=True,
+        linewidth=1,
+        linecolor=C['border'],
+        tickfont=dict(color=C['text_dim'], size=11),
+        rangeslider_visible=False
+    )
+    fig.update_yaxes(
+        title=y_title,
+        gridcolor=C['grid'],
+        showline=True,
+        linewidth=1,
+        linecolor=C['border'],
+        tickfont=dict(color=C['text_dim'], size=11),
+        zeroline=False
+    )
+    return fig
+
 # ==========================================
 # 4. PARSER GOOGLE SHEETS
 # ==========================================
@@ -504,6 +562,114 @@ def fetch_dividend_history(tickers_tuple, cache_key):
     return result
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def fetch_dividend_pay_calendar(tickers_tuple, cache_key):
+    """
+    Proiectie cash-flow pe luna de incasare.
+    Sursa principala este StockAnalysis, care include Pay Date si Cash Amount.
+    """
+    class DividendTableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows = []
+            self._row = None
+            self._cell = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "tr":
+                self._row = []
+            elif tag in ("td", "th") and self._row is not None:
+                self._cell = []
+
+        def handle_data(self, data):
+            if self._cell is not None:
+                self._cell.append(data)
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th") and self._row is not None and self._cell is not None:
+                self._row.append(" ".join(self._cell).strip())
+                self._cell = None
+            elif tag == "tr" and self._row is not None:
+                if self._row:
+                    self.rows.append(self._row)
+                self._row = None
+
+    def clean_cash_amount(value):
+        value = str(value).replace("$", "").replace(",", "").strip()
+        try:
+            return float(value)
+        except:
+            return 0.0
+
+    def parse_stockanalysis_rows(html):
+        parser = DividendTableParser()
+        parser.feed(html)
+        payments = []
+        for row in parser.rows:
+            if len(row) < 4 or "Ex-Dividend" in row[0]:
+                continue
+            try:
+                amount = clean_cash_amount(row[1])
+                pay_date = datetime.strptime(row[3], "%b %d, %Y")
+                if amount > 0:
+                    payments.append({"pay_date": pay_date, "amount": amount})
+            except:
+                continue
+        return sorted(payments, key=lambda x: x["pay_date"], reverse=True)
+
+    def infer_month_map_from_payments(payments):
+        if not payments:
+            return {}
+
+        today = datetime.now()
+        recent = [
+            p for p in payments
+            if (today - p["pay_date"]).days <= 430 or p["pay_date"] >= today
+        ]
+        recent_count = len(recent)
+
+        if recent_count >= 10:
+            expected_payments = 12
+        elif recent_count >= 3:
+            expected_payments = 4
+        elif recent_count >= 2:
+            expected_payments = 2
+        else:
+            expected_payments = 1
+
+        selected = payments[:expected_payments]
+        month_map = {}
+
+        if expected_payments in (4, 12):
+            current_amount = selected[0]["amount"]
+            for payment in selected:
+                month_idx = payment["pay_date"].month - 1
+                month_map[month_idx] = month_map.get(month_idx, 0.0) + current_amount
+        else:
+            for payment in selected:
+                month_idx = payment["pay_date"].month - 1
+                month_map[month_idx] = month_map.get(month_idx, 0.0) + payment["amount"]
+
+        return month_map
+
+    result = {}
+    for ticker in tickers_tuple:
+        try:
+            url = f"https://stockanalysis.com/stocks/{ticker.lower()}/dividend/"
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+            response.raise_for_status()
+            month_map = infer_month_map_from_payments(parse_stockanalysis_rows(response.text))
+            if month_map:
+                result[ticker] = {"month_map": month_map, "source": "StockAnalysis Pay Date"}
+                continue
+        except:
+            pass
+
+        fallback = fetch_dividend_history((ticker,), cache_key).get(ticker, {})
+        result[ticker] = {"month_map": fallback, "source": "yfinance ex-date fallback" if fallback else "N/A"}
+
+    return result
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_benchmarks(cache_key):
     try:
         result = {}
@@ -556,8 +722,7 @@ tickers_tuple = tuple(df_base["Simbol"].tolist())
 
 with st.spinner("Se preiau date de piață..."):
     live_info = fetch_live_data_cached(tickers_tuple, cache_key)
-    benchmarks = fetch_benchmarks(cache_key)
-    div_history = fetch_dividend_history(tickers_tuple, cache_key)
+    div_history = fetch_dividend_pay_calendar(tickers_tuple, cache_key)
 
 df = df_base.copy()
 df["Pret_Actual_US$"]    = df["Simbol"].map(lambda x: live_info[x]["Pret_Actual_Live"])
@@ -565,7 +730,13 @@ df["Pret_Anterior_US$"]  = df["Simbol"].map(lambda x: live_info[x]["Pret_Anterio
 df["Companie"]           = df["Simbol"].map(lambda x: live_info[x]["Nume_Companie"])
 df["Sector"]             = df["Simbol"].map(lambda x: live_info[x]["Sector_Live"])
 df["PE_Ratio"]           = df["Simbol"].map(lambda x: live_info[x]["PE_Ratio"])
-df["Venit_Anual_Div_US$"]= df.apply(lambda r: live_info[r["Simbol"]]["Div_Rate"] * r["Actiuni"], axis=1)
+df["Venit_Anual_Div_US$"]= df.apply(
+    lambda r: (
+        sum(div_history.get(r["Simbol"], {}).get("month_map", {}).values())
+        or live_info[r["Simbol"]]["Div_Rate"]
+    ) * r["Actiuni"],
+    axis=1
+)
 df["Payment_Date"]       = df["Simbol"].map(lambda x: live_info[x]["Payment_Date"])
 df["Earnings_Date"]      = df["Simbol"].map(lambda x: live_info[x]["Earnings_Date"])
 df["Logo"]               = df["Simbol"].map(lambda x: f"https://financialmodelingprep.com/image-stock/{x}.png")
@@ -622,11 +793,12 @@ st.write("")
 # ==========================================
 # 9. TABS
 # ==========================================
-tab1, tab_ai, tab2, tab3, tab4, tab_alerts = st.tabs([
+tab1, tab_ai, tab2, tab3, tab_watchlist, tab4, tab_alerts = st.tabs([
     "Matricea Portofoliului",
     "Diagnoză AI",
     "Fluxuri & Evenimente",
     "Rebalansare",
+    "Watchlist",
     "Deep Dive",
     "Alerte Preț"
 ])
@@ -732,29 +904,6 @@ with tab1:
 
         st.plotly_chart(fig_perf, use_container_width=True)
 
-    st.divider()
-    
-    # Benchmark pe toată lățimea
-    st.markdown("<p class='section-header'>BENCHMARK COMPARATIV — 1 AN</p>", unsafe_allow_html=True)
-    if not benchmarks.empty:
-        bench_colors = [C['gold'], C['blue'], C['text_dim']]
-        fig_bench = go.Figure()
-        for i, col_name in enumerate(benchmarks.columns):
-            fig_bench.add_trace(go.Scatter(
-                x=benchmarks.index, y=benchmarks[col_name], name=col_name,
-                line=dict(color=bench_colors[i % len(bench_colors)], width=2)
-            ))
-        fig_bench.update_layout(
-            **PLOTLY_BASE,
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                font=dict(color=C['text_dim'], size=11)
-            ),
-            xaxis=dict(**AX),
-            yaxis=dict(title="Valoare Normalizată (Baza 100)", **AX),
-            height=400
-        )
-        st.plotly_chart(fig_bench, use_container_width=True)
 # ==========================================
 # TAB AI: DIAGNOZĂ
 # ==========================================
@@ -947,7 +1096,9 @@ with tab2:
                 sym = row["Simbol"]
                 actiuni = row["Actiuni"]
                 venit_anual = row["Venit_Anual_Corectat"]
-                month_map = div_history.get(sym, {})
+                div_calendar = div_history.get(sym, {})
+                month_map = div_calendar.get("month_map", {})
+                div_source = div_calendar.get("source", "N/A")
 
                 if month_map:
                     # Avem date reale din istoric yfinance.
@@ -955,20 +1106,12 @@ with tab2:
                     # Suma lunară primită = div_per_share * număr acțiuni deținute
                     # Scalăm plățile istorice proporțional cu dividendRate curent,
                     # ca să reflectăm dividendul actual (nu cel de acum 12 luni).
-                    total_din_istoric = sum(month_map.values())  # total anual din istoric (per share)
-                    div_rate_curent = live_info[sym].get("Div_Rate", 0)
-
                     # Factor de scalare: dacă avem un dividendRate curent valid, ajustăm
-                    if div_rate_curent > 0 and total_din_istoric > 0:
-                        scale = div_rate_curent / total_din_istoric
-                    else:
-                        scale = 1.0  # folosim istoricul ca atare
-
                     for month_idx, div_ps_istoric in month_map.items():
-                        div_ps_actual = div_ps_istoric * scale
+                        div_ps_actual = div_ps_istoric
                         suma = div_ps_actual * actiuni
                         calendar_data[month_idx] += suma
-                        calendar_detail[month_idx].append(f"{sym}: ${suma:.2f}")
+                        calendar_detail[month_idx].append(f"{sym}: {actiuni:g} x ${div_ps_actual:.4f} = ${suma:.2f} ({div_source})")
                 else:
                     # Fallback pentru companii fără istoric în yfinance:
                     # distribuim venitul anual estimat pe lunile tipice de plată.
@@ -1011,6 +1154,7 @@ with tab2:
         )
         st.plotly_chart(fig_cal, use_container_width=True)
 
+    with col_real:
         # Tabel detaliat pe luni cu suma și companiile plătitoare
         st.markdown("<p class='section-header'>DETALIU LUNAR — COMPANII PLĂTITOARE</p>", unsafe_allow_html=True)
         rows_tabel = []
@@ -1046,7 +1190,8 @@ with tab2:
                 unsafe_allow_html=True
             )
 
-    with col_real:
+    st.divider()
+    if True:
         st.markdown("<p class='section-header'>RADAR EVENIMENTE FINANCIARE</p>", unsafe_allow_html=True)
         events_df = df[['Logo','Simbol','Companie','Payment_Date','Earnings_Date']].copy()
         st.dataframe(
@@ -1113,7 +1258,157 @@ with tab3:
         st.warning(f"Sub-alocare cu {100-suma_tinte:.2f}%. Distribuie restul.")
 
 # ==========================================
-# TAB 5: DEEP DIVE — COMPLET RESCRIS
+# TAB 5: WATCHLIST
+# ==========================================
+with tab_watchlist:
+    st.markdown("<p class='section-header'>WATCHLIST — OPORTUNITĂȚI DCA</p>", unsafe_allow_html=True)
+
+    min_score, max_pe = st.columns([1, 1])
+    with min_score:
+        scor_minim = st.slider("Scor minim", min_value=0, max_value=100, value=35, step=5)
+    with max_pe:
+        pe_maxim = st.slider("P/E maxim afișat", min_value=5, max_value=80, value=40, step=5)
+
+    watch_rows = []
+    median_weight = df["Pondere_%"].median() if not df.empty else 0
+
+    for _, row in df.iterrows():
+        sym = row["Simbol"]
+        live = live_info.get(sym, {})
+        price = row["Pret_Actual_US$"]
+        avg_cost = row["Pret_Mediu_Achizitie_US$"]
+        pe = row["PE_Ratio"]
+        div_yield = live.get("Div_Yield", 0)
+        payout = row["Payout_Ratio"]
+        sector = row["Sector"]
+        daily = row["Daily_Change_%"]
+        weight = row["Pondere_%"]
+
+        discount_pct = ((avg_cost - price) / avg_cost * 100) if avg_cost > 0 else 0
+        score = 0
+        reasons = []
+
+        if discount_pct > 0:
+            pts = min(28, discount_pct * 1.4)
+            score += pts
+            reasons.append(f"sub cost mediu cu {discount_pct:.1f}%")
+        elif row["Profit_%"] < 5:
+            score += 5
+            reasons.append("aproape de costul mediu")
+
+        if 0 < pe <= 15:
+            score += 20
+            reasons.append("P/E atractiv")
+        elif 15 < pe <= 25:
+            score += 12
+            reasons.append("P/E rezonabil")
+        elif 25 < pe <= pe_maxim:
+            score += 5
+
+        if div_yield >= 4:
+            score += 15
+            reasons.append("yield ridicat")
+        elif div_yield >= 2:
+            score += 9
+            reasons.append("yield decent")
+        elif div_yield > 0:
+            score += 4
+
+        if div_yield > 0:
+            if sector == "Real Estate":
+                score += 8
+                reasons.append("REIT plătitor")
+            elif payout and payout <= 65:
+                score += 14
+                reasons.append("payout sănătos")
+            elif payout and payout <= 85:
+                score += 7
+                reasons.append("payout acceptabil")
+
+        if daily < 0:
+            score += min(10, abs(daily) * 2)
+            reasons.append("slăbiciune zilnică")
+
+        if weight <= median_weight:
+            score += 6
+            reasons.append("pondere sub mediană")
+
+        score = round(min(score, 100), 1)
+        if score >= scor_minim and (pe <= pe_maxim or pe == 0):
+            if score >= 70:
+                signal = "Prioritate mare"
+            elif score >= 50:
+                signal = "De urmărit"
+            else:
+                signal = "Candidat"
+
+            watch_rows.append({
+                "Logo": row["Logo"],
+                "Simbol": sym,
+                "Companie": row["Companie"],
+                "Sector": sector,
+                "Scor": score,
+                "Semnal": signal,
+                "Preț": price,
+                "Cost mediu": avg_cost,
+                "Discount vs cost": discount_pct,
+                "P/E": pe,
+                "Div Yield": div_yield,
+                "Payout": payout,
+                "Pondere": weight,
+                "Motiv": ", ".join(reasons[:4]) if reasons else "monitorizare generală",
+            })
+
+    df_watch = (
+        pd.DataFrame(watch_rows).sort_values(["Scor", "Discount vs cost"], ascending=False)
+        if watch_rows else pd.DataFrame()
+    )
+
+    if df_watch.empty:
+        st.info("Nu există candidați care să treacă filtrele curente.")
+    else:
+        c_w1, c_w2, c_w3 = st.columns(3)
+        c_w1.metric("CANDIDAȚI", f"{len(df_watch)}")
+        c_w2.metric("SCOR MAXIM", f"{df_watch['Scor'].max():.1f}")
+        c_w3.metric("SUB COST MEDIU", f"{(df_watch['Discount vs cost'] > 0).sum()}")
+
+        fig_watch = px.bar(
+            df_watch.head(12).sort_values("Scor"),
+            x="Scor",
+            y="Simbol",
+            orientation="h",
+            color="Semnal",
+            color_discrete_map={
+                "Prioritate mare": C["green"],
+                "De urmărit": C["gold"],
+                "Candidat": C["blue"],
+            },
+            hover_data=["Companie", "Motiv", "Discount vs cost", "P/E", "Div Yield"]
+        )
+        apply_pro_chart_layout(fig_watch, height=360, y_title="", x_title="Scor")
+        fig_watch.update_layout(legend_title_text="")
+        st.plotly_chart(fig_watch, use_container_width=True)
+
+        st.dataframe(
+            df_watch,
+            column_config={
+                "Logo": st.column_config.ImageColumn(""),
+                "Scor": st.column_config.ProgressColumn("Scor", min_value=0, max_value=100, format="%.1f"),
+                "Preț": st.column_config.NumberColumn("Preț", format="$%.2f"),
+                "Cost mediu": st.column_config.NumberColumn("Cost mediu", format="$%.2f"),
+                "Discount vs cost": st.column_config.NumberColumn("Discount", format="%.2f%%"),
+                "P/E": st.column_config.NumberColumn("P/E", format="%.1f"),
+                "Div Yield": st.column_config.NumberColumn("Yield", format="%.2f%%"),
+                "Payout": st.column_config.NumberColumn("Payout", format="%.1f%%"),
+                "Pondere": st.column_config.NumberColumn("Pondere", format="%.2f%%"),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=520
+        )
+
+# ==========================================
+# TAB 6: DEEP DIVE — COMPLET RESCRIS
 # ==========================================
 with tab4:
     st.markdown("<p class='section-header'>ANALIZĂ DETALIATĂ PER ACTIV</p>", unsafe_allow_html=True)
@@ -1210,14 +1505,19 @@ with tab4:
             # Preț
             avg_buy = df[df['Simbol'] == selected_ticker]['Pret_Mediu_Achizitie_US$'].values
             fig_tech.add_trace(go.Scatter(x=hist.index, y=close, name="Close",
-                line=dict(color=C['blue'], width=2)), row=1, col=1)
+                mode="lines", fill="tozeroy", fillcolor="rgba(74,158,255,0.08)",
+                line=dict(color=C['blue'], width=2.6),
+                hovertemplate="$%{y:,.2f}<extra>Close</extra>"), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=hist.index, y=sma20, name="SMA 20",
-                line=dict(color=C['gold'], width=1.5, dash='dot')), row=1, col=1)
+                mode="lines", line=dict(color=C['gold'], width=1.6),
+                hovertemplate="$%{y:,.2f}<extra>SMA 20</extra>"), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=hist.index, y=bb_upper, name="BB+",
-                line=dict(color=C['text_dim'], width=1, dash='dash'), showlegend=False), row=1, col=1)
+                mode="lines", line=dict(color="rgba(139,148,158,0.55)", width=1, dash='dot'),
+                showlegend=False, hoverinfo="skip"), row=1, col=1)
             fig_tech.add_trace(go.Scatter(x=hist.index, y=bb_lower, name="BB−",
-                fill='tonexty', fillcolor='rgba(74,158,255,0.06)',
-                line=dict(color=C['text_dim'], width=1, dash='dash'), showlegend=False), row=1, col=1)
+                mode="lines", fill='tonexty', fillcolor='rgba(139,148,158,0.08)',
+                line=dict(color="rgba(139,148,158,0.55)", width=1, dash='dot'),
+                showlegend=False, hoverinfo="skip"), row=1, col=1)
             if len(avg_buy) > 0 and avg_buy[0] > 0:
                 fig_tech.add_hline(y=avg_buy[0], line_dash="dash", line_color=C['gold'],
                                    annotation_text=f" Cost mediu: ${avg_buy[0]:.2f}",
@@ -1227,11 +1527,13 @@ with tab4:
             vol_colors = [C['green'] if c >= o else C['red']
                           for c, o in zip(hist['Close'], hist['Open'])]
             fig_tech.add_trace(go.Bar(x=hist.index, y=volume, name="Volum",
-                marker_color=vol_colors, opacity=0.7, showlegend=False), row=2, col=1)
+                marker_color=vol_colors, opacity=0.42, showlegend=False,
+                hovertemplate="%{y:,.0f}<extra>Volum</extra>"), row=2, col=1)
 
             # RSI
             fig_tech.add_trace(go.Scatter(x=hist.index, y=rsi, name="RSI",
-                line=dict(color=C['gold'], width=1.8), showlegend=False), row=3, col=1)
+                mode="lines", line=dict(color=C['gold'], width=2), showlegend=False,
+                hovertemplate="%{y:.1f}<extra>RSI</extra>"), row=3, col=1)
             fig_tech.add_hline(y=70, line_dash="dot", line_color=C['red'],
                                line_width=1, row=3, col=1)
             fig_tech.add_hline(y=30, line_dash="dot", line_color=C['green'],
@@ -1244,27 +1546,35 @@ with tab4:
             # MACD
             macd_bar_colors = [C['green'] if v >= 0 else C['red'] for v in macd_hist]
             fig_tech.add_trace(go.Bar(x=hist.index, y=macd_hist, name="MACD Hist",
-                marker_color=macd_bar_colors, opacity=0.8, showlegend=False), row=4, col=1)
+                marker_color=macd_bar_colors, opacity=0.5, showlegend=False,
+                hovertemplate="%{y:.2f}<extra>MACD Hist</extra>"), row=4, col=1)
             fig_tech.add_trace(go.Scatter(x=hist.index, y=macd_line, name="MACD",
-                line=dict(color=C['blue'], width=1.5), showlegend=False), row=4, col=1)
+                mode="lines", line=dict(color=C['blue'], width=1.8), showlegend=False,
+                hovertemplate="%{y:.2f}<extra>MACD</extra>"), row=4, col=1)
             fig_tech.add_trace(go.Scatter(x=hist.index, y=signal_line, name="Signal",
-                line=dict(color=C['gold'], width=1.5), showlegend=False), row=4, col=1)
+                mode="lines", line=dict(color=C['gold'], width=1.5), showlegend=False,
+                hovertemplate="%{y:.2f}<extra>Signal</extra>"), row=4, col=1)
 
             fig_tech.update_layout(
                 **PLOTLY_BASE,
-                height=680,
-                margin=dict(t=30, b=20, l=10, r=10),
-                legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
-                            font=dict(color=C['text_dim'], size=11)),
+                height=700,
+                margin=dict(t=42, b=24, l=12, r=18),
+                legend=PRO_LEGEND,
                 hovermode="x unified",
+                hoverlabel=dict(bgcolor=C['surface'], bordercolor=C['border'], font=dict(color=C['text'], size=12)),
             )
             for i in range(1, 5):
                 fig_tech.update_yaxes(
                     gridcolor=C['grid'], linecolor=C['border'],
+                    showline=True, linewidth=1, zeroline=False,
                     tickfont=dict(color=C['text_dim'], size=10), row=i, col=1
                 )
-                fig_tech.update_xaxes(gridcolor=C['grid'], linecolor=C['border'],
+                fig_tech.update_xaxes(showgrid=False, linecolor=C['border'], showline=True,
                                       tickfont=dict(color=C['text_dim'], size=10), row=i, col=1)
+            fig_tech.update_yaxes(title_text="Preț ($)", row=1, col=1)
+            fig_tech.update_yaxes(title_text="Volum", row=2, col=1)
+            fig_tech.update_yaxes(title_text="RSI", range=[0, 100], row=3, col=1)
+            fig_tech.update_yaxes(title_text="MACD", row=4, col=1)
             for ann in fig_tech.layout.annotations:
                 ann.font.color = C['text_dim']
                 ann.font.size = 11
@@ -1409,22 +1719,24 @@ with tab4:
         for col_idx, col_obj in enumerate([sc_col1, sc_col2]):
             with col_obj:
                 rows_subset = scorecard_rows[:half] if col_idx == 0 else scorecard_rows[half:]
-                html_rows = ""
+                html_rows = []
                 for r in rows_subset:
-                    html_rows += f"""
-                    <div class='scorecard-row'>
-                        <div>
-                            <p style='margin:0; font-size: 0.88rem; color: {C["text"]};'>{r['Indicator']}</p>
-                            <p style='margin:0; font-size: 0.72rem; color: {C["text_dim"]};'>{r['Note']}</p>
-                        </div>
-                        <div style='text-align: right;'>
-                            <p style='margin:0 0 4px 0; font-family: DM Mono, monospace;
-                                      font-size: 0.95rem; color: {C["gold"]};'>{r['Valoare']}</p>
-                            {r['Status']}
-                        </div>
-                    </div>
-                    """
-                st.markdown(f"<div class='fin-card'>{html_rows}</div>", unsafe_allow_html=True)
+                    indicator = html_lib.escape(str(r["Indicator"]))
+                    note = html_lib.escape(str(r["Note"]))
+                    value = html_lib.escape(str(r["Valoare"]))
+                    html_rows.append(
+                        "<div class='scorecard-row'>"
+                        "<div>"
+                        f"<p style='margin:0; font-size:0.88rem; color:{C['text']};'>{indicator}</p>"
+                        f"<p style='margin:0; font-size:0.72rem; color:{C['text_dim']};'>{note}</p>"
+                        "</div>"
+                        "<div style='text-align:right;'>"
+                        f"<p style='margin:0 0 4px 0; font-family:DM Mono, monospace; font-size:0.95rem; color:{C['gold']};'>{value}</p>"
+                        f"{r['Status']}"
+                        "</div>"
+                        "</div>"
+                    )
+                st.markdown(f"<div class='fin-card'>{''.join(html_rows)}</div>", unsafe_allow_html=True)
 
         # Radar Chart vizual
         st.write("")
@@ -1612,19 +1924,20 @@ with tab4:
                     ("Kurtosis", f"{kurt_r:.2f}", kurt_r < 3),
                     ("Cel mai rău Drawdown", f"{max_dd_val:.2f}%", max_dd_val > -5),
                 ]
-                html_risk = ""
+                html_risk = []
                 for label, value, is_good in risk_metrics:
                     badge_color = C['green'] if is_good else C['red']
-                    dot = f"<span style='color:{badge_color}; font-size: 0.6rem;'>●</span>"
-                    html_risk += f"""
-                    <div style='display: flex; justify-content: space-between; align-items: center;
-                                padding: 8px 0; border-bottom: 1px solid {C['border']};'>
-                        <span style='font-size: 0.80rem; color: {C['text_dim']};'>{dot} {label}</span>
-                        <span style='font-family: DM Mono, monospace; font-size: 0.88rem;
-                                     color: {C["text"]};'>{value}</span>
-                    </div>
-                    """
-                st.markdown(f"<div class='fin-card fin-card-accent'>{html_risk}</div>", unsafe_allow_html=True)
+                    safe_label = html_lib.escape(str(label))
+                    safe_value = html_lib.escape(str(value))
+                    html_risk.append(
+                        "<div style='display:flex; justify-content:space-between; align-items:center; "
+                        f"padding:8px 0; border-bottom:1px solid {C['border']};'>"
+                        f"<span style='font-size:0.80rem; color:{C['text_dim']};'>"
+                        f"<span style='color:{badge_color}; font-size:0.6rem;'>●</span> {safe_label}</span>"
+                        f"<span style='font-family:DM Mono, monospace; font-size:0.88rem; color:{C['text']};'>{safe_value}</span>"
+                        "</div>"
+                    )
+                st.markdown(f"<div class='fin-card fin-card-accent'>{''.join(html_risk)}</div>", unsafe_allow_html=True)
 
     except Exception as e:
         st.warning(f"Date insuficiente pentru distribuția randamentelor: {e}")
@@ -1638,8 +1951,20 @@ with tab4:
         try:
             hist2 = stock_eval.history(period="1y")
             if not hist2.empty:
-                fig_hist2 = px.line(hist2, y="Close")
-                fig_hist2.update_traces(line=dict(color=C['blue'], width=2))
+                hist2 = hist2.copy()
+                hist2["MA50"] = hist2["Close"].rolling(50).mean()
+                fig_hist2 = go.Figure()
+                fig_hist2.add_trace(go.Scatter(
+                    x=hist2.index, y=hist2["Close"], name="Close",
+                    mode="lines", fill="tozeroy", fillcolor="rgba(74,158,255,0.08)",
+                    line=dict(color=C['blue'], width=2.6),
+                    hovertemplate="$%{y:,.2f}<extra>Close</extra>"
+                ))
+                fig_hist2.add_trace(go.Scatter(
+                    x=hist2.index, y=hist2["MA50"], name="MA 50",
+                    mode="lines", line=dict(color=C['gold'], width=1.5),
+                    hovertemplate="$%{y:,.2f}<extra>MA 50</extra>"
+                ))
                 try:
                     avg_p = df[df['Simbol'] == selected_ticker]['Pret_Mediu_Achizitie_US$'].values[0]
                     if avg_p > 0:
@@ -1647,10 +1972,7 @@ with tab4:
                                             annotation_text=f" Cost mediu: ${avg_p:.2f}",
                                             annotation_font=dict(color=C['gold'], size=11))
                 except: pass
-                fig_hist2.update_layout(**PLOTLY_BASE, height=280,
-                    margin=dict(t=30, b=20, l=10, r=10),
-                    xaxis=dict(gridcolor=C['grid'], linecolor=C['border'], tickfont=dict(color=C['text_dim'], size=11)),
-                    yaxis=dict(title="Preț ($)", gridcolor=C['grid'], linecolor=C['border'], tickfont=dict(color=C['text_dim'], size=11)))
+                apply_pro_chart_layout(fig_hist2, height=310, y_title="Preț ($)")
                 st.plotly_chart(fig_hist2, use_container_width=True)
         except Exception as e:
             st.warning(f"Eroare: {e}")
@@ -1668,17 +1990,18 @@ with tab4:
                     df_cf2.index = pd.to_datetime(df_cf2.index).year
                     df_cf2 = df_cf2.sort_index().dropna(how='all')
                     fig_fcf2 = go.Figure()
-                    fig_fcf2.add_trace(go.Scatter(x=df_cf2.index, y=df_cf2["Div/Share"], name='Div/Share',
-                        line=dict(color=C['gold'], width=2.5)))
                     fig_fcf2.add_trace(go.Scatter(x=df_cf2.index, y=df_cf2["FCF/Share"], name='FCF/Share',
-                        fill='tonexty', fillcolor='rgba(46,204,113,0.08)',
-                        line=dict(color=C['green'], width=2)))
-                    fig_fcf2.update_layout(**PLOTLY_BASE, height=280,
-                        margin=dict(t=30, b=20, l=10, r=10),
-                        legend=dict(orientation="h", y=1.02, x=1, xanchor="right",
-                                    font=dict(color=C['text_dim'], size=11)),
-                        xaxis=dict(dtick=1, gridcolor=C['grid'], linecolor=C['border'], tickfont=dict(color=C['text_dim'], size=11)),
-                        yaxis=dict(gridcolor=C['grid'], linecolor=C['border'], rangemode='tozero', tickfont=dict(color=C['text_dim'], size=11)))
+                        mode="lines+markers", fill='tozeroy', fillcolor='rgba(46,204,113,0.08)',
+                        line=dict(color=C['green'], width=2.4),
+                        marker=dict(size=7, color=C['green'], line=dict(width=1, color=C['surface'])),
+                        hovertemplate="$%{y:,.2f}<extra>FCF/Share</extra>"))
+                    fig_fcf2.add_trace(go.Scatter(x=df_cf2.index, y=df_cf2["Div/Share"], name='Div/Share',
+                        mode="lines+markers", line=dict(color=C['gold'], width=2.4),
+                        marker=dict(size=7, color=C['gold'], line=dict(width=1, color=C['surface'])),
+                        hovertemplate="$%{y:,.2f}<extra>Div/Share</extra>"))
+                    apply_pro_chart_layout(fig_fcf2, height=310, y_title="$ / acțiune", x_title="An")
+                    fig_fcf2.update_xaxes(dtick=1)
+                    fig_fcf2.update_yaxes(rangemode='tozero')
                     st.plotly_chart(fig_fcf2, use_container_width=True)
                 else:
                     st.info("Date FCF insuficiente.")
@@ -1725,7 +2048,7 @@ with tab4:
             <p class='fin-label'>Consens Estimat (Fwd)</p>
             <p style='font-family: DM Mono, monospace; font-size: 1.4rem; color: {eps_color2}; margin: 0;'>
                 {eps_arrow2} ${f_eps2:.2f}
-            </p>
+            </p>a
         </div>
         """, unsafe_allow_html=True)
 
@@ -1764,13 +2087,22 @@ with tab4:
             if rev_idx2:
                 rev2 = fin2.loc[rev_idx2[0]].sort_index()
                 rev2.index = pd.to_datetime(rev2.index).year
-                fig_rev2 = px.line(x=rev2.index, y=rev2.values / 1e9, markers=True)
-                fig_rev2.update_traces(line=dict(color=C['blue'], width=2.5),
-                                       marker=dict(color=C['gold'], size=8))
-                fig_rev2.update_layout(**PLOTLY_BASE, height=260,
-                    margin=dict(t=30, b=20, l=10, r=10),
-                    xaxis=dict(dtick=1, gridcolor=C['grid'], linecolor=C['border'], title="Anul", tickfont=dict(color=C['text_dim'], size=11)),
-                    yaxis=dict(gridcolor=C['grid'], linecolor=C['border'], rangemode='tozero', title="Miliarde $", tickfont=dict(color=C['text_dim'], size=11)))
+                rev_b = rev2.values / 1e9
+                fig_rev2 = go.Figure()
+                fig_rev2.add_trace(go.Bar(
+                    x=rev2.index, y=rev_b, name="Venituri",
+                    marker=dict(color="rgba(74,158,255,0.40)", line=dict(color=C['blue'], width=1)),
+                    hovertemplate="$%{y:,.2f}B<extra>Venituri</extra>"
+                ))
+                fig_rev2.add_trace(go.Scatter(
+                    x=rev2.index, y=rev_b, name="Trend",
+                    mode="lines+markers", line=dict(color=C['gold'], width=2.4),
+                    marker=dict(size=8, color=C['gold'], line=dict(width=1, color=C['surface'])),
+                    hovertemplate="$%{y:,.2f}B<extra>Trend</extra>"
+                ))
+                apply_pro_chart_layout(fig_rev2, height=300, y_title="Miliarde $", x_title="An")
+                fig_rev2.update_xaxes(dtick=1)
+                fig_rev2.update_yaxes(rangemode='tozero')
                 st.plotly_chart(fig_rev2, use_container_width=True)
         except: pass
 
@@ -1785,12 +2117,22 @@ with tab4:
                 sh2_colors = [C['green'] if v < sh2.iloc[i-1] else C['red']
                               for i, v in enumerate(sh2) if i > 0]
                 sh2_colors = [C['text_dim']] + sh2_colors
-                fig_sh2 = px.bar(x=sh2.index, y=sh2.values / 1e6)
-                fig_sh2.update_traces(marker_color=sh2_colors)
-                fig_sh2.update_layout(**PLOTLY_BASE, height=260,
-                    margin=dict(t=30, b=20, l=10, r=10),
-                    xaxis=dict(dtick=1, gridcolor=C['grid'], linecolor=C['border'], title="Anul", tickfont=dict(color=C['text_dim'], size=11)),
-                    yaxis=dict(gridcolor=C['grid'], linecolor=C['border'], rangemode='tozero', title="Milioane Acțiuni", tickfont=dict(color=C['text_dim'], size=11)))
+                sh_m = sh2.values / 1e6
+                fig_sh2 = go.Figure()
+                fig_sh2.add_trace(go.Bar(
+                    x=sh2.index, y=sh_m, name="Acțiuni",
+                    marker=dict(color=sh2_colors, line=dict(color=C['border'], width=1)),
+                    opacity=0.82,
+                    hovertemplate="%{y:,.1f}M<extra>Acțiuni</extra>"
+                ))
+                fig_sh2.add_trace(go.Scatter(
+                    x=sh2.index, y=sh_m, name="Trend",
+                    mode="lines", line=dict(color=C['text_dim'], width=1.6, dash="dot"),
+                    hoverinfo="skip"
+                ))
+                apply_pro_chart_layout(fig_sh2, height=300, y_title="Milioane acțiuni", x_title="An")
+                fig_sh2.update_xaxes(dtick=1)
+                fig_sh2.update_yaxes(rangemode='tozero')
                 st.plotly_chart(fig_sh2, use_container_width=True)
         except: pass
 
